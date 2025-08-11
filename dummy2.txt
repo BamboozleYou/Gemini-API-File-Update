@@ -1,0 +1,2 @@
+customers dummy id is 1111 22xx xxxx
+customers dummy email is customer123@gmail.com
