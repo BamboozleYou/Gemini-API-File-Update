@@ -85,6 +85,10 @@ function monitorFileUploads() {
 
 // NEW: Handle file uploads and extract content
 async function handleFileUpload(files) {
+    // Clear previous files when new files are uploaded
+    console.log("🗑️ Clearing previous uploaded files from memory");
+    uploadedFiles.clear();
+    
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
         console.log(`📄 Processing uploaded file: ${file.name}`);
@@ -136,17 +140,21 @@ async function checkUploadedDocumentsForPII() {
                     );
                 });
 
-                fileData.checked = true;
-                
                 if (response?.action === "block") {
+                    // DON'T mark as checked if PII found - allow re-checking on next attempt
                     piiResults.push({
                         filename: filename,
                         hasPII: true
                     });
+                    console.log(`🚨 PII found in ${filename} - will re-check on next send attempt`);
+                } else {
+                    // Only mark as checked if no PII found
+                    fileData.checked = true;
+                    console.log(`✅ No PII in ${filename} - marked as checked`);
                 }
             } catch (error) {
                 console.error(`❌ Error checking PII in ${filename}:`, error);
-                fileData.checked = true; // Mark as checked to avoid repeated attempts
+                // Don't mark as checked on error - allow retry
             }
         }
     }
