@@ -1,94 +1,99 @@
-const GEMINI_API_KEY = ""; // ← replace this with your real key
+const GEMINI_API_KEY = "AIzaSyA-ol7CCNDNpFBjkN-loeKu_ViX3drEnGU"; // ← replace this with your real key
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    
     if (request.action === "filterPII") {
-        console.log("🔍 Gemini PII Filter Request:", request.text);
+        const userPrompt = `Does this text contain any personally identifiable information (PII) that's not dummy data? Reply with only YES or NO.
 
-        const timeout = setTimeout(() => {
-            console.warn("🚨 Gemini API Timed Out. Proceeding with unfiltered text.");
-            sendResponse({ filtered_text: request.text }); // fallback
-        }, 5000);
-
-        const userPrompt = `Text: "${request.text}"\n\nDoes the text contain any PII such as phone number,name,or important personal information? Reply with only YES or NO.`;
+Text: "${request.text}"`;
 
         fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                contents: [
-                    {
-                        parts: [
-                            { text: userPrompt }
-                        ]
-                    }
-                ]
+                contents: [{ parts: [{ text: userPrompt }] }]
             })
         })
         .then(response => response.json())
         .then(data => {
-            clearTimeout(timeout);
-        
             const rawReply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase();
             const action = (rawReply === "YES") ? "block" : "allow";
-        
-            console.log(`✅ Gemini Reply: ${rawReply}, Action: ${action}`);
-            sendResponse({ action });
+            sendResponse({ action, gemini_response: rawReply });
         })
-        
         .catch(error => {
-            clearTimeout(timeout);
-            console.error("❌ Gemini API Error:", error);
-            sendResponse({ filtered_text: request.text });
+            sendResponse({ action: "allow", error: error.message });
         });
 
-        return true; // Keep message channel open for async response
+        return true;
     }
 
-    // NEW: Handle document content checking
     if (request.action === "checkDocumentPII") {
-        console.log("📄 Checking document for PII:", request.filename);
+        console.log("\n🎯 === PII DETECTOR ACTIVATED ===");
+        console.log("🎯 File being checked:", request.filename);
 
-        const timeout = setTimeout(() => {
-            console.warn("🚨 Gemini API Timed Out for document check.");
-            sendResponse({ action: "allow" }); // fallback to allow
-        }, 10000); // Longer timeout for documents
+        // LOG TEXT READ FROM FILE
+        console.log("\n📄 === TEXT READ FROM FILE ===");
+        console.log("=" + "=".repeat(50));
+        console.log(request.content);
+        console.log("=" + "=".repeat(50));
 
-        const userPrompt = `Document content: "${request.content}"\n\nDoes this document contain any PII such as phone numbers, names, addresses, or important personal information? Reply with only YES or NO.`;
+        // Truncate if needed
+        let contentToCheck = request.content || "";
+        if (contentToCheck.length > 20000) {
+            contentToCheck = contentToCheck.substring(0, 20000) + "\n... (truncated)";
+        }
+
+        // Simple, clean prompt
+        const userPrompt = `Does this document contain any personally identifiable information (PII) that's not dummy data? Reply with only YES or NO.
+
+Document: "${contentToCheck}"`;
+
+        // LOG PROMPT SENT TO GEMINI
+        console.log("\n🚀 === PROMPT SENT TO GEMINI ===");
+        console.log("-" + "-".repeat(50));
+        console.log(userPrompt);
+        console.log("-" + "-".repeat(50));
 
         fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`, {
             method: "POST",
-            headers: {
-                "Content-Type": "application/json"
-            },
+            headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                contents: [
-                    {
-                        parts: [
-                            { text: userPrompt }
-                        ]
-                    }
-                ]
+                contents: [{ parts: [{ text: userPrompt }] }]
             })
         })
         .then(response => response.json())
         .then(data => {
-            clearTimeout(timeout);
-        
-            const rawReply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toUpperCase();
-            const action = (rawReply === "YES") ? "block" : "allow";
-        
-            console.log(`📄 Document PII Check - File: ${request.filename}, Reply: ${rawReply}, Action: ${action}`);
-            sendResponse({ action, filename: request.filename });
+            // LOG GEMINI RESPONSE
+            console.log("\n📥 === GEMINI RESPONSE ===");
+            console.log("*" + "*".repeat(50));
+            console.log(JSON.stringify(data, null, 2));
+            console.log("*" + "*".repeat(50));
+            
+            const rawReply = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+            console.log("📥 Gemini said: '" + rawReply + "'");
+            
+            const action = (rawReply?.toUpperCase() === "YES") ? "block" : "allow";
+            
+            console.log("\n📊 === FINAL DECISION ===");
+            console.log("📊 Final action:", action.toUpperCase());
+            
+            sendResponse({ 
+                action, 
+                filename: request.filename,
+                gemini_response: rawReply
+            });
         })
-        
         .catch(error => {
-            clearTimeout(timeout);
-            console.error("❌ Gemini API Error for document:", error);
-            sendResponse({ action: "allow", filename: request.filename });
+            console.log("\n❌ === API ERROR ===");
+            console.log("❌ Error:", error.message);
+            
+            sendResponse({ 
+                action: "block",
+                filename: request.filename,
+                error: error.message
+            });
         });
 
-        return true; // Keep message channel open for async response
+        return true;
     }
 });
