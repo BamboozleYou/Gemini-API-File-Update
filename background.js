@@ -1,4 +1,4 @@
-const GEMINI_API_KEY = "AIzaSyA-ol7CCNDNpFBjkN-loeKu_ViX3drEnGU"; // ← replace this with your real key
+const GEMINI_API_KEY = ""; // ← replace this with your real key
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     
@@ -97,3 +97,4 @@ Document: "${contentToCheck}"`;
         return true;
     }
 });
+
