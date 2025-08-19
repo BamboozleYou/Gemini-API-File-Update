@@ -1,128 +1,11 @@
-console.log("✅ PII Detection Filter Content Script Loaded");
+let uploadedFiles = new Map();
+let isCheckingPII = false;
 
-let latestUserInput = "";
-let typingTimeout;
-let uploadedFiles = new Map(); // Track uploaded files and their content
-
-// PURE JAVASCRIPT: PDF text extraction without any external libraries
-async function extractTextFromPDF(file) {
-    console.log("🔄 Starting PDF text extraction...");
-    
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-            try {
-                const arrayBuffer = e.target.result;
-                const uint8Array = new Uint8Array(arrayBuffer);
-                
-                console.log(`📄 PDF file size: ${uint8Array.length} bytes`);
-                
-                // Convert to string for pattern matching
-                let pdfText = '';
-                for (let i = 0; i < uint8Array.length; i++) {
-                    pdfText += String.fromCharCode(uint8Array[i]);
-                }
-                
-                console.log(`📄 PDF converted to string, length: ${pdfText.length}`);
-                
-                const extractedTexts = [];
-                
-                // Method 1: Extract text between parentheses (most common in PDFs)
-                const parenthesesRegex = /\(([^)]*)\)/g;
-                let match;
-                while ((match = parenthesesRegex.exec(pdfText)) !== null) {
-                    const text = match[1];
-                    if (text && text.length > 0 && !/^[\s\x00-\x1F]*$/.test(text)) {
-                        extractedTexts.push(text);
-                    }
-                }
-                
-                console.log(`📄 Method 1 - Parentheses extraction found ${extractedTexts.length} text segments`);
-                
-                // Method 2: Extract text between angle brackets
-                const angleBracketRegex = /<([^>]+)>/g;
-                while ((match = angleBracketRegex.exec(pdfText)) !== null) {
-                    const text = match[1];
-                    if (text && text.length > 0 && !/^[\s\x00-\x1F]*$/.test(text)) {
-                        extractedTexts.push(text);
-                    }
-                }
-                
-                console.log(`📄 Method 2 - Angle brackets found additional segments`);
-                
-                // Method 3: Look for readable text patterns (letters/numbers/spaces)
-                const readableTextRegex = /[a-zA-Z0-9\s]{3,}/g;
-                const readableMatches = pdfText.match(readableTextRegex) || [];
-                
-                // Filter out very long strings (likely encoded data) and very short ones
-                const filteredReadable = readableMatches.filter(text => 
-                    text.length >= 3 && 
-                    text.length <= 200 && 
-                    !/^[\s\d]+$/.test(text) && // Not just spaces and numbers
-                    /[a-zA-Z]/.test(text) // Contains at least one letter
-                );
-                
-                extractedTexts.push(...filteredReadable);
-                
-                console.log(`📄 Method 3 - Readable text patterns found ${filteredReadable.length} segments`);
-                
-                // Method 4: Look for stream content (between 'stream' and 'endstream')
-                const streamRegex = /stream\s*(.*?)\s*endstream/gs;
-                while ((match = streamRegex.exec(pdfText)) !== null) {
-                    const streamContent = match[1];
-                    // Look for readable text in stream content
-                    const streamText = streamContent.match(/[a-zA-Z0-9\s]{3,}/g) || [];
-                    streamText.forEach(text => {
-                        if (text.length >= 3 && text.length <= 200 && /[a-zA-Z]/.test(text)) {
-                            extractedTexts.push(text);
-                        }
-                    });
-                }
-                
-                console.log(`📄 Method 4 - Stream content extraction completed`);
-                
-                // Combine and clean up extracted text
-                let finalText = extractedTexts
-                    .map(text => text.trim())
-                    .filter(text => text.length > 0)
-                    .join(' ')
-                    .replace(/\s+/g, ' ') // Replace multiple spaces with single space
-                    .trim();
-                
-                // Remove common PDF artifacts
-                finalText = finalText
-                    .replace(/\\[nrtf]/g, ' ') // Remove escape sequences
-                    .replace(/[^\x20-\x7E]/g, ' ') // Remove non-printable characters
-                    .replace(/\s+/g, ' ') // Clean up spaces again
-                    .trim();
-                
-                console.log(`📄 Final extracted text length: ${finalText.length} characters`);
-                console.log(`📄 ===== EXTRACTED PDF CONTENT START =====`);
-                console.log(finalText);
-                console.log(`📄 ===== EXTRACTED PDF CONTENT END =====`);
-                
-                if (finalText.length === 0) {
-                    console.warn("⚠️ Warning: No readable text extracted from PDF!");
-                    resolve("[PDF file - no readable text found. Blocking for safety - manual review required for PII]");
-                } else {
-                    console.log(`✅ Successfully extracted ${finalText.length} characters from PDF`);
-                    resolve(finalText);
-                }
-                
-            } catch (error) {
-                console.error('❌ Error in PDF text extraction:', error);
-                reject(error);
-            }
-        };
-        
-        reader.onerror = (error) => {
-            console.error('❌ FileReader error:', error);
-            reject(error);
-        };
-        
-        reader.readAsArrayBuffer(file);
-    });
-}
+const API_CONFIG = {
+    baseUrl: 'http://127.0.0.1:8080',
+    extractEndpoint: '/extract-text',
+    timeout: 30000
+};
 
 function findActiveInputField() {
     let inputField = document.querySelector("textarea:not([style*='display: none'])") 
@@ -141,6 +24,7 @@ function disableSendButton() {
     let sendButton = findSendButton();
     if (sendButton) {
         sendButton.disabled = true;
+        sendButton.style.opacity = "0.5";
     }
 }
 
@@ -148,109 +32,108 @@ function enableSendButton() {
     let sendButton = findSendButton();
     if (sendButton) {
         sendButton.disabled = false;
+        sendButton.style.opacity = "1";
     }
 }
 
-function showDetectionPopup() {
-    alert("🚨 Personal Information detected in your message!\n It is against the corporate policy.\n Message will not be sent");
+function showDetectionPopup(message) {
+    alert("🚨 Personal Information Detected!\n\n" + message + "\n\nMessage blocked by corporate policy.");
 }
 
-function showDocumentPIIPopup(filename) {
-    alert(`🚨 Personal Information detected in uploaded document: ${filename}!\nIt is against the corporate policy.\nMessage will not be sent`);
-}
-
-// Extract text from uploaded files (PDF and text only)
 async function extractTextFromFile(file) {
-    const fileName = file.name.toLowerCase();
-    const fileType = file.type.toLowerCase();
-    
+    console.log("\n📡 === CALLING FILE EXTRACTION API ===");
+    console.log("📡 File name:", file.name);
+    console.log("📡 File type:", file.type);
+    console.log("📡 File size:", file.size, "bytes");
+    console.log("📡 API endpoint:", API_CONFIG.baseUrl + API_CONFIG.extractEndpoint);
+
     try {
-        // Handle PDF files
-        if (fileType === 'application/pdf' || fileName.endsWith('.pdf')) {
-            console.log(`📄 Processing PDF file: ${file.name}`);
-            return await extractTextFromPDF(file);
+        const formData = new FormData();
+        formData.append('file', file);
+        
+        console.log("📡 Sending file to extraction API...");
+        
+        const response = await fetch(API_CONFIG.baseUrl + API_CONFIG.extractEndpoint, {
+            method: 'POST',
+            body: formData,
+            signal: AbortSignal.timeout(API_CONFIG.timeout)
+        });
+        
+        console.log("📡 API Response status:", response.status);
+        console.log("📡 API Response status text:", response.statusText);
+        
+        if (!response.ok) {
+            throw new Error("HTTP " + response.status + ": " + response.statusText);
         }
         
-        // Handle text files
-        if (fileType.startsWith('text/') || fileName.endsWith('.txt')) {
-            console.log(`📄 Processing text file: ${file.name}`);
-            return new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onload = function(e) {
-                    try {
-                        const content = e.target.result;
-                        console.log(`📄 Text file content length: ${content.length}`);
-                        console.log(`📄 Text file content preview: ${content.substring(0, 200)}...`);
-                        resolve(content);
-                    } catch (error) {
-                        reject(error);
-                    }
-                };
-                reader.onerror = reject;
-                reader.readAsText(file);
-            });
-        }
+        const result = await response.json();
         
-        // For other file types, return a placeholder message
-        console.log(`❓ Unsupported file type: ${file.name} (${fileType})`);
-        return `[${fileType || 'Unknown'} file: ${file.name}] - Manual review recommended for PII`;
+        console.log("\n📄 === FILE EXTRACTION API RESULT ===");
+        console.log("📄 Extraction success:", result.success);
+        console.log("📄 Filename:", result.filename);
+        console.log("📄 File size:", result.file_size);
+        console.log("📄 Text length:", result.text_length);
+        console.log("📄 Supported:", result.supported);
+        
+        if (result.success && result.extracted_text) {
+            console.log("\n📄 === EXTRACTED TEXT FROM FILE ===");
+            console.log("📄 FULL EXTRACTED CONTENT:");
+            console.log("=" + "=".repeat(60));
+            console.log(result.extracted_text);
+            console.log("=" + "=".repeat(60));
+            console.log("📄 Character count:", result.extracted_text.length);
+            console.log("📄 Word count:", result.extracted_text.split(/\s+/).length);
+            console.log("📄 Lines count:", result.extracted_text.split('\n').length);
+            
+            return result.extracted_text;
+        } else {
+            console.log("❌ File extraction failed:");
+            console.log("   - Success:", result.success);
+            console.log("   - Error:", result.error);
+            console.log("   - Extracted text:", result.extracted_text);
+            
+            return "[Error: Could not extract text from " + file.name + "]";
+        }
         
     } catch (error) {
-        console.error(`❌ Error processing file ${file.name}:`, error);
-        throw error;
+        console.log("❌ === FILE EXTRACTION API ERROR ===");
+        console.log("❌ Error type:", error.name);
+        console.log("❌ Error message:", error.message);
+        console.log("❌ Full error:", error);
+        
+        return "[Error: " + error.message + "]";
     }
-}
-
-function monitorFileUploads() {
-    document.addEventListener('change', async (e) => {
-        if (e.target.type === 'file' && e.target.files.length > 0) {
-            console.log("📎 File upload detected via input change");
-            await handleFileUpload(e.target.files);
-        }
-    }, true);
-
-    document.addEventListener('drop', async (e) => {
-        if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-            console.log("📎 File upload detected via drag & drop");
-            await handleFileUpload(e.dataTransfer.files);
-        }
-    }, true);
 }
 
 async function handleFileUpload(files) {
-    console.log("🗑️ Clearing previous uploaded files from memory");
+    console.log("\n📁 === FILE UPLOAD DETECTED ===");
+    console.log("📁 Number of files:", files.length);
+    
     uploadedFiles.clear();
     
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        console.log(`📄 Processing uploaded file: ${file.name} (${file.type})`);
+        
+        console.log("\n📁 Processing file " + (i + 1) + "/" + files.length + ":", file.name);
         
         try {
             const content = await extractTextFromFile(file);
+            const hasError = !content || content.trim().length === 0 || content.startsWith("[Error:");
             
-            if (!content || content.trim().length === 0) {
-                console.error(`❌ No content extracted from ${file.name}`);
-                uploadedFiles.set(file.name, {
-                    content: `Error: No readable content found in ${file.name}`,
-                    type: file.type,
-                    size: file.size,
-                    checked: false,
-                    hasError: true
-                });
-            } else {
-                uploadedFiles.set(file.name, {
-                    content: content,
-                    type: file.type,
-                    size: file.size,
-                    checked: false,
-                    hasError: false
-                });
-                console.log(`✅ File content extracted for: ${file.name} (${content.length} characters)`);
-            }
-        } catch (error) {
-            console.error(`❌ Error extracting content from ${file.name}:`, error);
             uploadedFiles.set(file.name, {
-                content: `Error reading file: ${file.name} - ${error.message}`,
+                content: content,
+                type: file.type,
+                size: file.size,
+                checked: false,
+                hasError: hasError
+            });
+            
+            console.log("📁 File stored in memory:", file.name, hasError ? "(HAS ERROR)" : "(SUCCESS)");
+            
+        } catch (error) {
+            console.log("❌ Failed to process file:", file.name, error.message);
+            uploadedFiles.set(file.name, {
+                content: "Error: " + error.message,
                 type: file.type,
                 size: file.size,
                 checked: false,
@@ -258,35 +141,42 @@ async function handleFileUpload(files) {
             });
         }
     }
+    
+    console.log("📁 Total files in memory:", uploadedFiles.size);
 }
 
 async function checkUploadedDocumentsForPII() {
     const piiResults = [];
     
-    console.log(`🔍 Checking ${uploadedFiles.size} uploaded files for PII...`);
+    console.log("\n🎯 === PII DETECTION ACTIVATED FOR FILES ===");
+    console.log("🎯 Number of files to check:", uploadedFiles.size);
     
     for (const [filename, fileData] of uploadedFiles) {
-        console.log(`📋 File: ${filename}, Checked: ${fileData.checked}, HasError: ${fileData.hasError}, Content Length: ${fileData.content?.length || 0}`);
+        console.log("\n🎯 Checking file:", filename);
+        console.log("🎯 Has error:", fileData.hasError);
+        console.log("🎯 Already checked:", fileData.checked);
+        console.log("🎯 Content length:", fileData.content?.length || 0);
         
         if (fileData.hasError) {
-            console.log(`🚨 File ${filename} had extraction errors - blocking for safety`);
+            console.log("🚨 File has error - will block:", filename);
             piiResults.push({
                 filename: filename,
                 hasPII: true,
-                reason: "File extraction error"
+                reason: "File extraction failed"
             });
             continue;
         }
         
         if (!fileData.checked && fileData.content && fileData.content.length > 0) {
-            console.log(`🔍 Checking document for PII: ${filename}`);
-            console.log(`📄 Content to be checked: ${fileData.content.substring(0, 200)}...`);
+            console.log("🎯 Sending to background script for Gemini PII check...");
             
             try {
                 const response = await new Promise((resolve, reject) => {
                     const timeout = setTimeout(() => {
-                        reject(new Error("PII check timeout"));
-                    }, 15000);
+                        reject(new Error("Background script timeout"));
+                    }, 30000); // Increased timeout for debugging
+                    
+                    console.log("🎯 Calling chrome.runtime.sendMessage...");
                     
                     chrome.runtime.sendMessage(
                         { 
@@ -296,8 +186,14 @@ async function checkUploadedDocumentsForPII() {
                         },
                         (response) => {
                             clearTimeout(timeout);
+                            console.log("🎯 Background script responded for", filename);
+                            
                             if (chrome.runtime.lastError) {
-                                reject(chrome.runtime.lastError);
+                                console.error("❌ Chrome runtime error:", chrome.runtime.lastError);
+                                reject(new Error("Chrome runtime error: " + chrome.runtime.lastError.message));
+                            } else if (!response) {
+                                console.error("❌ No response from background script");
+                                reject(new Error("No response from background script"));
                             } else {
                                 resolve(response);
                             }
@@ -305,97 +201,178 @@ async function checkUploadedDocumentsForPII() {
                     );
                 });
 
-                console.log(`📋 PII Check Response for ${filename}:`, response);
+                console.log("\n🎯 === PII CHECK RESULT ===");
+                console.log("🎯 File:", filename);
+                console.log("🎯 Action:", response.action);
+                console.log("🎯 Gemini said:", response.gemini_response);
+                console.log("🎯 Reasoning:", response.reasoning);
 
-                if (response?.action === "block") {
+                if (response.action === "block") {
+                    console.log("🚨 PII DETECTED - WILL BLOCK MESSAGE");
                     piiResults.push({
                         filename: filename,
                         hasPII: true,
-                        reason: "PII detected by API"
+                        reason: "PII detected",
+                        gemini_response: response.gemini_response
                     });
-                    console.log(`🚨 PII found in ${filename} - will re-check on next send attempt`);
                 } else {
+                    console.log("✅ NO PII DETECTED - WILL ALLOW");
                     fileData.checked = true;
-                    console.log(`✅ No PII in ${filename} - marked as checked`);
                 }
+                
             } catch (error) {
-                console.error(`❌ Error checking PII in ${filename}:`, error);
+                console.log("❌ PII check failed for", filename + ":", error.message);
                 piiResults.push({
                     filename: filename,
                     hasPII: true,
-                    reason: `API error: ${error.message}`
+                    reason: "PII check failed: " + error.message
                 });
-                console.log(`🚨 Blocking ${filename} due to PII check error`);
             }
-        } else if (!fileData.content || fileData.content.length === 0) {
-            console.log(`⚠️ File ${filename} has no content - blocking for safety`);
-            piiResults.push({
-                filename: filename,
-                hasPII: true,
-                reason: "No content extracted"
-            });
+        } else {
+            console.log("⏭️ Skipping file (no content or already checked):", filename);
         }
     }
     
-    console.log(`🔍 PII Check Results:`, piiResults);
+    console.log("\n🎯 === PII CHECK SUMMARY ===");
+    console.log("🎯 Total files checked:", uploadedFiles.size);
+    console.log("🎯 Files with PII/errors:", piiResults.length);
+    
     return piiResults;
 }
 
 async function checkPIIonSend(inputField) {
-    let userInput = inputField.innerText;
-    if (userInput === "") return;
+    const userInput = inputField.innerText || inputField.value || "";
     
-    console.log("🔄 Starting PII check process...");
+    if (isCheckingPII) {
+        console.log("⏳ PII check already in progress - ignoring");
+        return;
+    }
+    
+    console.log("\n🚀 === STARTING COMPREHENSIVE PII CHECK ===");
+    console.log("🚀 User input length:", userInput.length);
+    console.log("🚀 Number of files to check:", uploadedFiles.size);
+    
+    isCheckingPII = true;
     disableSendButton();
     
-    chrome.runtime.sendMessage(
-        { action: "filterPII", text: userInput },
-        async (response) => {
-            console.log("📝 Text PII check response:", response);
+    try {
+        // Check text input
+        if (userInput && userInput.trim().length > 0) {
+            console.log("🎯 Activating PII detector for text input...");
             
-            if (response?.action === "block") {
-                console.log("🚨 PII detected by Gemini in text prompt.");
-                showDetectionPopup();
-                enableSendButton();
-                return;
-            }
-            
-            console.log("✅ No PII in text prompt, checking documents...");
-            console.log(`📁 Number of uploaded files to check: ${uploadedFiles.size}`);
-            
-            const documentPIIResults = await checkUploadedDocumentsForPII();
-            
-            console.log(`📊 Document PII Results: ${documentPIIResults.length} files with issues`);
-            
-            if (documentPIIResults.length > 0) {
-                console.log("🚨 PII or errors detected in uploaded documents.");
-                const blockedFiles = documentPIIResults.map(result => `${result.filename} (${result.reason || 'PII detected'})`).join(", ");
-                showDocumentPIIPopup(blockedFiles);
-                enableSendButton();
-                return;
-            }
-            
-            console.log("✅ No PII detected in text or documents, allowing message to send.");
-
-            let sendButton = findSendButton();
-            if (sendButton) {
-                sendButton.removeEventListener("click", handleSendButtonClick, true);
+            const textResponse = await new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error("Text PII check timeout"));
+                }, 15000);
                 
-                let event = new MouseEvent("click", {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                });
-                sendButton.dispatchEvent(event);
-
-                setTimeout(() => {
-                    sendButton.addEventListener("click", handleSendButtonClick, true);
-                    uploadedFiles.clear();
-                    console.log("🧹 Cleared uploaded files after successful send");
-                }, 100);
+                chrome.runtime.sendMessage(
+                    { action: "filterPII", text: userInput },
+                    (response) => {
+                        clearTimeout(timeout);
+                        
+                        if (chrome.runtime.lastError) {
+                            reject(new Error("Chrome runtime error: " + chrome.runtime.lastError.message));
+                        } else if (!response) {
+                            reject(new Error("No response from background script"));
+                        } else {
+                            resolve(response);
+                        }
+                    }
+                );
+            });
+            
+            console.log("🎯 Text PII check result:", textResponse.action);
+            
+            if (textResponse.action === "block") {
+                console.log("🚨 PII DETECTED IN TEXT - BLOCKING MESSAGE");
+                showDetectionPopup("PII detected in your message text");
+                return;
             }
         }
-    );
+        
+        // Check files
+        if (uploadedFiles.size > 0) {
+            const documentPIIResults = await checkUploadedDocumentsForPII();
+            
+            if (documentPIIResults.length > 0) {
+                console.log("🚨 PII DETECTED IN FILES - BLOCKING MESSAGE");
+                const blockedFilesList = documentPIIResults.map(result => 
+                    "• " + result.filename + ": " + result.reason
+                ).join("\n");
+                
+                showDetectionPopup("PII detected in uploaded files:\n\n" + blockedFilesList);
+                return;
+            }
+        }
+        
+        console.log("✅ ALL CHECKS PASSED - ALLOWING MESSAGE");
+        
+        // Allow send
+        const sendButton = findSendButton();
+        if (sendButton) {
+            sendButton.removeEventListener("click", handleSendButtonClick, true);
+            
+            const clickEvent = new MouseEvent("click", {
+                bubbles: true,
+                cancelable: true,
+                view: window
+            });
+            
+            sendButton.dispatchEvent(clickEvent);
+            
+            setTimeout(() => {
+                sendButton.addEventListener("click", handleSendButtonClick, true);
+                uploadedFiles.clear();
+                console.log("🧹 Files cleared after send");
+            }, 500);
+        }
+        
+    } catch (error) {
+        console.log("❌ Error during PII check:", error.message);
+        showDetectionPopup("Error checking for PII - message blocked for safety:\n" + error.message);
+    } finally {
+        isCheckingPII = false;
+        enableSendButton();
+    }
+}
+
+function handleSendButtonClick(event) {
+    console.log("🔘 Send button clicked - intercepting for PII check");
+    
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    
+    const inputField = findActiveInputField();
+    if (!inputField) {
+        console.log("⚠️ No input field found");
+        return;
+    }
+    
+    checkPIIonSend(inputField);
+}
+
+function handleEnterKeyPress(event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+        console.log("⌨️ Enter key pressed - intercepting for PII check");
+        
+        const inputField = findActiveInputField();
+        if (!inputField) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        
+        checkPIIonSend(inputField);
+    }
+}
+
+function attachFilterToSendButton() {
+    const sendButton = findSendButton();
+    if (!sendButton) return;
+    
+    sendButton.removeEventListener("click", handleSendButtonClick, true);
+    sendButton.addEventListener("click", handleSendButtonClick, true);
 }
 
 function attachEnterKeyListener() {
@@ -403,44 +380,47 @@ function attachEnterKeyListener() {
     document.addEventListener("keydown", handleEnterKeyPress, true);
 }
 
-function handleEnterKeyPress(event) {
-    if (event.key === "Enter" && !event.shiftKey) {
-        const inputField = findActiveInputField();
-        if (!inputField) return;
+function monitorFileUploads() {
+    document.addEventListener('change', async (e) => {
+        if (e.target.type === 'file' && e.target.files.length > 0) {
+            console.log("🔎 File upload detected via input change");
+            await handleFileUpload(e.target.files);
+        }
+    }, true);
 
-        event.preventDefault();
-        event.stopPropagation();
-        checkPIIonSend(inputField)
-    }
-}
-
-function attachFilterToSendButton() {
-    let sendButton = findSendButton();
-    if (!sendButton) return;
-    sendButton.removeEventListener("click", handleSendButtonClick);
-    sendButton.addEventListener("click", handleSendButtonClick, true);
-}
-
-function handleSendButtonClick(event) {
-    event.preventDefault();
-    event.stopPropagation();
-    
-    const inputField = findActiveInputField();
-    if (!inputField) return;
-    
-    checkPIIonSend(inputField);
+    document.addEventListener('drop', async (e) => {
+        if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+            console.log("🔎 File upload detected via drag & drop");
+            await handleFileUpload(e.dataTransfer.files);
+        }
+    }, true);
 }
 
 function observeUIChanges() {
     const observer = new MutationObserver(() => {
         attachFilterToSendButton();
-        attachEnterKeyListener();
     });
     observer.observe(document.body, { childList: true, subtree: true });
     attachFilterToSendButton();
-    attachEnterKeyListener();
 }
 
-// Initialize everything
+// Test functions
+window.testPII = function(text) {
+    console.log("🧪 === MANUAL PII TEST ===");
+    console.log("🧪 Test text:", text || "My name is John Smith, phone: 555-123-4567");
+    
+    chrome.runtime.sendMessage(
+        { action: "filterPII", text: text || "My name is John Smith, phone: 555-123-4567" },
+        (response) => {
+            console.log("🧪 TEST RESULT:", response);
+        }
+    );
+};
+
+console.log("✅ Enhanced Debug PII Filter Loaded");
+console.log("💡 Use testPII('text') to test PII detection manually");
+
+// Initialize
 observeUIChanges();
+attachEnterKeyListener();
 monitorFileUploads();
